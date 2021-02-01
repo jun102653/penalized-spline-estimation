@@ -1,0 +1,474 @@
+## The following is the R code for application. By running this code, we can get the penalized spline estimation for formula (7). The code can be easily adapted for 
+## other panel count data model.
+
+
+#set the diretory
+setwd("H:/project1")
+#remove all the subjects
+rm(list=ls())
+#library package
+library(Matrix)      
+library(fda)         
+library(splines)
+library(quadprog)
+library(MASS)
+
+start<-Sys.time()
+
+
+### Algorithm 1
+projected.NR<-function(theta0,object,gradient,hessian,constraint.matrix,constraint.vector,accuracy,e,iterate_max) 
+{
+  theta.current <- theta0
+  eigen.min <- min(eigen(-hessian(theta.current),only.values = T)$values)     
+  eigen.max <- max(eigen(-hessian(theta.current),only.values = T)$values)     
+  
+  if(eigen.min>=0&eigen.max<=10^10)  H <-(-solve(hessian(theta.current)))  else stop("the hessian at theta0 is not positive definate")
+ 
+  B.theta.current <- theta.current+H%*%gradient(theta.current)
+  
+  theta.tu <- solve.QP(2*(-(hessian(theta.current))),2*(-(hessian(theta.current)))%*%B.theta.current,constraint.matrix,constraint.vector)$solution
+  
+  ### line search
+  x <- theta.current; y <-  theta.tu 
+  if(object(y)>=object(x)+e*t(gradient(x))%*%(y-x)) theta.next <- y  else
+  {
+    lam <-1 ; p <- 0.5;
+    while((object(y)>object(x)+(1-e)*t(gradient(x))%*%(y-x)|object(y)<object(x)+e*t(gradient(x))%*%(y-x))&(p>1e-15)) 
+    {
+      if (object(y)>object(x)+(1-e)*t(gradient(x))%*%(y-x)) lam <- lam+p
+      if(object(y)<object(x)+e*t(gradient(x))%*%(y-x))   lam <- lam-p
+      y <- x+lam*(theta.tu-x); p <- p/2
+    }
+    theta.next <- y
+  }
+  
+  ### iterate >=2
+  if(max(abs(theta.next-theta.current))<=accuracy) list(index=1,iterate=1,theta.est=theta.next) else
+  {
+    
+    index <- 0; iterate <- 2
+    while (iterate<=iterate_max) 
+    {
+      eigen.min <- min(eigen(-hessian(theta.next),only.values = T)$values)      
+      eigen.max <- max(eigen(-hessian(theta.next),only.values = T)$values)      
+      
+      if(eigen.min>=0&eigen.max<=10^10)  H <-(-solve(hessian(theta.next)))  else H <-(-solve(diag(diag(hessian(theta.current)))))
+      
+      B.theta.current <- theta.next+H%*%gradient(theta.next)
+      if(eigen.min>=0&eigen.max<=10^10) theta.tu <- solve.QP(2*(-(hessian(theta.next))),2*(-(hessian(theta.next)))%*%B.theta.current,constraint.matrix,constraint.vector)$solution else
+      theta.tu <- solve.QP(2*(-(diag(diag(hessian(theta.current))))),2*(-(diag(diag(hessian(theta.current)))))%*%B.theta.current,constraint.matrix,constraint.vector)$solution 
+      theta.current <- theta.next
+      
+      
+      x <- theta.current; y <-  theta.tu 
+      if(object(y)>=object(x)+e*t(gradient(x))%*%(y-x)) theta.next <- y  else
+      {
+        lam <-1 ; p <- 0.5;
+        while((object(y)>object(x)+(1-e)*t(gradient(x))%*%(y-x)|object(y)<object(x)+e*t(gradient(x))%*%(y-x))&(p>1e-15)) 
+        {
+          if (object(y)>object(x)+(1-e)*t(gradient(x))%*%(y-x)) lam <- lam+p
+          if(object(y)<object(x)+e*t(gradient(x))%*%(y-x))   lam <- lam-p
+          y <- x+lam*(theta.tu-x); p <- p/2
+        }
+        theta.next <- y
+      }
+      if(max(abs(theta.next-theta.current))<=accuracy) {index=1;iterate=iterate+1; break}
+      iterate <- iterate+1
+    }
+    list(index=index,iterate=iterate-1,theta.est=theta.next)
+  }
+  
+}
+
+
+##basis. is a function to compute the ith B-spline basis function evaluated at x(can be a vector),bs1. is to return the B matix with knots and x (x need not be that generating the knots(like bs()),x can be totally unrelated to the knots)
+basis. <- function(x, degree, i, knots) {
+  if(degree == 0){
+    B <- ifelse((x >= knots[i]) & (x < knots[i+1]), 1, 0)
+  } else {
+    if((knots[degree+i] - knots[i]) == 0) {
+      alpha1 <- 0
+    } else {
+      alpha1 <- (x - knots[i])/(knots[degree+i] - knots[i])
+    }
+    if((knots[i+degree+1] - knots[i+1]) == 0) {
+      alpha2 <- 0
+    } else {
+      alpha2 <- (knots[i+degree+1] - x)/(knots[i+degree+1] - knots[i+1])
+    }
+    B <- alpha1*basis.(x, (degree-1), i, knots) + alpha2*basis.(x, (degree-1), (i+1), knots)
+  }
+  return(B)
+}
+
+bs1. <- function(x, degree=3, interior.knots=NULL, intercept=FALSE, Boundary.knots = c(0,1)) {
+  if(missing(x)) stop("You must provide x")
+  if(degree < 1) stop("The spline degree must be at least 1")
+  Boundary.knots <- sort(Boundary.knots)
+  interior.knots.sorted <- NULL
+  if(!is.null(interior.knots)) interior.knots.sorted <- sort(interior.knots)
+  knots <- c(rep(Boundary.knots[1], (degree+1)), interior.knots.sorted, rep(Boundary.knots[2], (degree+1)))
+  K <- length(interior.knots) + degree + 1
+  B.mat <- matrix(0,length(x),K)
+  for(j in 1:K) B.mat[,j] <- basis.(x, degree, j, knots)
+  if(any(x == Boundary.knots[2])) B.mat[x == Boundary.knots[2], K] <- 1
+  if(intercept == FALSE) {
+    return(B.mat[,-1])
+  } else {
+    return(B.mat)
+  }
+}
+
+
+### Penalized spline estimation when the effect of beta(t) is time-varying.
+choose.lambda<-function(data.all,nknots.pe,theta0.pe,lambda.vector0,lambda.vector1)
+{
+  D <- diff(diff(diag(nknots.pe+4)))
+  Amat<-matrix(0,length(theta0.pe),length(theta0.pe))
+  diag(Amat)<--1
+  for(i.... in 1:(length(theta0.pe)-1)){Amat[i....,i....+1]<-1}
+  Amat<-Amat[-((nknots.pe+4):(length(theta0.pe))),]
+  bvec<-rep(0,nknots.pe+3)
+  
+  time<-data.all[,2]
+  countmat<-data.all[,3]
+  covar1.<-data.all[,4]
+  covar2.<-data.all[,5]
+  covar3.<-data.all[,6]
+  
+  #######################################
+  splineknots<-unname(quantile(time, seq(0, 1, length=nknots.pe+2))) 
+  timebasis=bs(time, df = nknots.pe+4, intercept = TRUE)   #generate a set of B-spline basis function
+  B<-as.matrix(timebasis)                            #define cubic spline matrix B
+  
+  #################################################################################
+  CB<-cbind(B,covar1.*B,covar2.,covar3.)
+  
+  cvl <- matrix(0,nrow=length(lambda.vector0),ncol=length(lambda.vector1))
+  theta<-rep(0,length(theta0.pe))
+  lf.value <- matrix(0,nrow=length(lambda.vector0),ncol=length(lambda.vector1))
+  
+  
+  #define  
+  for(i.. in 1:length(lambda.vector0))
+  {
+    for (j.. in 1:length(lambda.vector1))
+    {
+      P0 <- as.matrix(bdiag((lambda.vector0[i..])*(t(D)%*%D),(lambda.vector1[j..])*(t(D)%*%D),matrix(0,nrow=2,ncol=2)))
+      
+      #pesudo-likelihood function
+      plf<-function(theta){
+        sum( c(countmat*(CB%*%theta))-c(exp(CB%*%theta)))-0.5*t(theta)%*%P0%*%theta}
+      
+      #gradient for pesudo-likelihood function
+      grad.theta<-function(theta){
+        apply(countmat*CB-CB*c(exp(CB%*%theta)),2,sum)-P0%*%theta}
+      
+      hessian.plf <-function(theta) {(-t(CB)%*%(CB*c(exp(CB%*%theta))))-P0}
+      theta.curr <-projected.NR(theta0.pe,plf,grad.theta,hessian.plf,t(Amat),bvec,1e-10,0.25,500)$theta.est
+      
+      lf.value[i..,j..] <- plf(theta.curr)+0.5*t(theta.curr)%*%P0%*%theta.curr   
+      
+      H.inverse <- solve(hessian.plf(theta.curr))
+      cvl[i..,j..] <- lf.value[i..,j..]-sum(diag((-H.inverse)%*%(-hessian.plf(theta.curr)-P0)))
+      theta<-cbind(theta,theta.curr)
+      
+    }
+  }
+  theta <- theta[,-1]
+  
+  best.index0=(which(cvl == max(cvl), arr.ind = TRUE))[1]
+  lambda0.best<-lambda.vector0[best.index0] 
+  best.index1=(which(cvl == max(cvl), arr.ind = TRUE))[2]
+  lambda1.best<-lambda.vector1[best.index1] 
+  theta.choose <- theta[,(best.index0-1)*length(lambda.vector1)+best.index1]
+  
+  list(theta.choose=theta.choose,splineknots.choose=splineknots,lambda0.choose=lambda0.best,lambda1.choose=lambda1.best)
+}
+
+
+
+### Penalized spline estimation when the effect of beta(t) is time-constant.
+choose.lambda.constant.beta<-function(data.all,nknots.vector.constant,lambda.vector)
+{
+  time<-data.all[,2]
+  countmat<-data.all[,3]
+  covar1.<-data.all[,4]
+  covar2.<-data.all[,5]
+  covar3.<-data.all[,6]
+  
+  theta.esti <- list()
+  splineknots <- list()
+  
+  
+  cvl <- matrix(0,nrow=length(nknots.vector.constant),ncol=length(lambda.vector))
+  lf.value <- matrix(0,nrow=length(nknots.vector.constant),ncol=length(lambda.vector))
+  plf.value <-matrix(0,nrow=length(nknots.vector.constant),ncol=length(lambda.vector))
+  
+  for(i. in 1:length(nknots.vector.constant))
+  {
+    splineknots[[i.]]<-unname(quantile(time, seq(0, 1, length=(nknots.vector.constant[i.])+2))) 
+    theta0 <- c(seq(1,2,length=(nknots.vector.constant[i.])+4),rep(0.000001,3))
+    
+    timebasis=bs(time, df = (nknots.vector.constant[i.])+4, intercept = TRUE)   #generate a set of B-spline basis function
+    B<-as.matrix(timebasis)                            #define cubic spline matrix B
+    
+    
+    
+    #################################################################################
+    CB<-cbind(B,covar1.,covar2.,covar3.)
+    D <- diff(diff(diag((nknots.vector.constant[i.])+4)))
+    Amat<-matrix(0,length(theta0),length(theta0))
+    diag(Amat)<--1
+    for(i in 1:(length(theta0)-1)){Amat[i,i+1]<-1}
+    Amat<-Amat[-(((nknots.vector.constant[i.])+4):(length(theta0))),]
+    
+    bvec<-rep(0,(nknots.vector.constant[i.])+3)
+    
+    #define  
+    for (j in 1:length(lambda.vector)) #length(lambda.vector)
+    {
+      P0 <- as.matrix(bdiag((lambda.vector[j])*(t(D)%*%D),matrix(0,nrow=3,ncol=3)))
+      
+      #pesudo-likelihood function
+      plf<-function(theta){
+        sum( c(countmat*(CB%*%theta))-c(exp(CB%*%theta)))-0.5*t(theta)%*%P0%*%theta}
+      
+      #gradient for pesudo-likelihood function
+      grad.theta<-function(theta){
+        apply(countmat*CB-CB*c(exp(CB%*%theta)),2,sum)-P0%*%theta}
+          
+      hessian.plf <-function(theta) {(-t(CB)%*%(CB*c(exp(CB%*%theta))))-P0}
+      theta.curr <-projected.NR(theta0,plf,grad.theta,hessian.plf,t(Amat),bvec,1e-10,0.25,500)$theta.est
+      
+      plf.value[i.,j] <- plf(theta.curr)
+      lf.value[i.,j] <- plf.value[i.,j]+0.5*t(theta.curr)%*%P0%*%theta.curr   
+      
+      H.inverse <- solve(hessian.plf(theta.curr))
+      
+      cvl[i.,j] <- lf.value[i.,j]-sum(diag((-H.inverse)%*%(-hessian.plf(theta.curr)-P0))) # method2
+      theta.esti[[(i.-1)*length(lambda.vector)+j]] <-theta.curr 
+      
+    }
+  }
+  
+  best.index0 <- (which(cvl == max(cvl), arr.ind = TRUE))[1]
+  best.index1 <- (which(cvl == max(cvl), arr.ind = TRUE))[2]
+  nknots.choose<-nknots.vector.constant[best.index0] 
+  lambda.best<-lambda.vector[best.index1] 
+  theta.choose <- theta.esti[[(best.index0-1)*length(lambda.vector)+best.index1]]
+  splineknots.choose <- splineknots[[best.index0]]
+  
+  list(nknots.choose=nknots.choose,theta.choose=theta.choose,splineknots.choose=splineknots.choose,lambda.best=lambda.best)
+}
+
+
+### Estimation for the real data and bootstrap 
+monte.boot<-function(data.all,nknots.pe,theta0.pe,lambda.vector0,lambda.vector1,nknots.vector.constant,lambda.vector,rs.num)
+{  
+
+  monte.result <- choose.lambda(data.all,nknots.pe,theta0.pe,lambda.vector0,lambda.vector1)
+  monte.theta.choose <-monte.result$theta.choose
+  monte.splineknots.choose <- monte.result$splineknots.choose
+  monte.lambda0.choose <- monte.result$lambda0.choose
+  monte.lambda1.choose <- monte.result$lambda1.choose
+  
+  
+  monte.result.constant <- choose.lambda.constant.beta(data.all,nknots.vector.constant,lambda.vector)
+  monte.theta.choose.constant <-monte.result.constant$theta.choose
+  monte.splineknots.choose.constant <- monte.result.constant$splineknots.choose
+  monte.nknots.choose.constant <- monte.result.constant$nknots.choose
+  monte.lambda.choose.constant <- monte.result.constant$lambda.best
+  
+  ## for bootstrap
+  boot.splineknots.choose <- list()
+  boot.knotmin.choose <- c(); boot.knotmax.choose <- c()
+  boot.theta.choose.list <- list()
+ 
+  boot.splineknots.choose.constant <- list()
+  boot.knotmin.choose.constant <- c(); boot.knotmax.choose.constant <- c()
+  boot.theta.choose.list.constant <- list()
+  boot.nknots.choose.constant <- c()
+  
+  
+  data.all<-data.frame(data.all)
+  
+  for(i... in 1:rs.num)
+  {
+    set.seed(i...) 
+    resample.sub<-replicate(1, sample(1:(max(data1[,1])),size=(max(data1[,1])),replace=TRUE))      ## nsub*1 matrix
+    obs<-rep(0,dim(data1)[2])
+    resample.data<-data.frame()
+    for(i. in 1:(max(data1[,1]))){obs<-rbind(obs,subset(data1,data1[,1]==resample.sub[i.]))}
+    true.obs<-obs[-1,]
+    resample.data<-true.obs[order(true.obs[,2]),] 
+    
+    boot.result <- choose.lambda(resample.data,nknots.pe,theta0.pe,lambda.vector0,lambda.vector1)
+    boot.theta.choose.list[[i...]] <- boot.result$theta.choose
+    boot.splineknots.choose[[i...]] <-boot.result$splineknots.choose 
+    boot.knotmin.choose[i...] <- min(boot.result$splineknots.choose)
+    boot.knotmax.choose[i...] <- max(boot.result$splineknots.choose)
+    
+
+    boot.result.constant <- choose.lambda.constant.beta(resample.data,nknots.vector.constant,lambda.vector)
+    
+    boot.theta.choose.list.constant[[i...]] <- boot.result.constant$theta.choose
+    boot.splineknots.choose.constant[[i...]] <-boot.result.constant$splineknots.choose 
+    boot.nknots.choose.constant[i...] <-boot.result.constant$nknots.choose 
+    boot.knotmin.choose.constant[i...] <- min(boot.result.constant$splineknots.choose)
+    boot.knotmax.choose.constant[i...] <- max(boot.result.constant$splineknots.choose)
+    
+  }  
+  
+  knotmin.max <- max(boot.knotmin.choose,min(monte.splineknots.choose))
+  knotmax.min <- min(boot.knotmax.choose,max(monte.splineknots.choose))
+  
+  list(monte.theta.choose=monte.theta.choose,monte.splineknots.choose=monte.splineknots.choose,boot.theta.choose.list=boot.theta.choose.list,boot.splineknots.choose=boot.splineknots.choose,
+       monte.lambda0.choose=monte.lambda0.choose,monte.lambda1.choose=monte.lambda1.choose,knotmin.max=knotmin.max,knotmax.min =knotmax.min,
+       monte.theta.choose.constant=monte.theta.choose.constant,monte.splineknots.choose.constant=monte.splineknots.choose.constant,monte.nknots.choose.constant=monte.nknots.choose.constant,boot.theta.choose.list.constant=boot.theta.choose.list.constant,boot.splineknots.choose.constant=boot.splineknots.choose.constant,boot.nknots.choose.constant=boot.nknots.choose.constant,
+       monte.lambda.choose.constant=monte.lambda.choose.constant)
+}
+
+
+rs.num=100
+nknot.pe.vary <- 6
+theta0.pe<-c(seq(1,2,length=nknot.pe.vary+4),rep(0.000001,nknot.pe.vary+6))
+lambda.vector <-c(0,c(exp(seq(-0.5,15,length=14))))
+lambda.vector0 <- lambda.vector1 <- c(0,c(exp(seq(-0.5,15,length=14))))
+
+nknots.vector.constant <- 6 ## for function choose.lambda.constant.beta
+
+data1 <- read.csv(file="H:/sasdata/realdata3_9.csv",head=TRUE,sep=",") ## your own data
+
+result <- monte.boot(data1,nknot.pe.vary,theta0.pe,lambda.vector0,lambda.vector1,nknots.vector.constant,lambda.vector,rs.num)
+
+test.time<-seq(from=(result$knotmin.max)+0.1,to=(result$knotmax.min)-0.1,length=100) ## length of test time
+
+## initial values
+monte.beta.est.mat <-  matrix(0,nrow=length(test.time),ncol=2)
+monte.lambda.est.mat <-  matrix(0,nrow=length(test.time),ncol=2)
+boot.beta.est.choose.mat <-  matrix(0,nrow=length(test.time),ncol=rs.num)
+beta.boot.2.5.choose <- rep(0,length(test.time))
+beta.boot.97.5.choose <- rep(0,length(test.time))
+
+boot.alpha1.choose.vec <-boot.alpha2.choose.vec <- c() 
+
+boot.alpha0.choose.vec.constant <-boot.alpha1.choose.vec.constant <-boot.alpha2.choose.vec.constant <- c() 
+
+
+
+## for beta(t) with time-varying effect
+monte.theta.choose <- result$monte.theta.choose
+monte.lambda0.choose <- result$monte.lambda0.choose
+monte.lambda1.choose <- result$monte.lambda1.choose
+monte.splineknots.choose <- result$monte.splineknots.choose
+monte.nknots.choose <- nknot.pe.vary
+monte.Bsplinemat.choose <- bs1.(test.time,degree = 3,interior.knots=(monte.splineknots.choose)[2:(monte.nknots.choose+1)], intercept=T, Boundary.knots = c((monte.splineknots.choose)[1],(monte.splineknots.choose)[monte.nknots.choose+2]))
+monte.beta.est.mat[,1] <-monte.Bsplinemat.choose%*%monte.theta.choose[(monte.nknots.choose+5):(2*(monte.nknots.choose+4))] 
+monte.lambda.est.mat[,1] <-exp(monte.Bsplinemat.choose%*%monte.theta.choose[1:(monte.nknots.choose+4)])
+
+monte.alpha1.choose <-monte.theta.choose[(2*(monte.nknots.choose+4))+1] 
+monte.alpha2.choose <-monte.theta.choose[(2*(monte.nknots.choose+4))+2] 
+
+
+
+## for beta(t) with time-constant effect
+monte.theta.choose.constant <- result$monte.theta.choose.constant
+monte.nknots.choose.constant <- result$monte.nknots.choose.constant
+monte.lambda.choose.constant <- result$monte.lambda.choose.constant
+
+
+monte.alpha0.choose.constant <-monte.theta.choose.constant[(monte.nknots.choose.constant+4)+1] 
+monte.alpha1.choose.constant <-monte.theta.choose.constant[(monte.nknots.choose.constant+4)+2] 
+monte.alpha2.choose.constant <-monte.theta.choose.constant[(monte.nknots.choose.constant+4)+3] 
+
+
+# for bootstrap
+
+
+boot.theta.choose.list <- result$boot.theta.choose.list
+boot.splineknots.choose <- result$boot.splineknots.choose
+boot.nknots.choose <- rep(nknot.pe.vary,rs.num)
+
+
+boot.theta.choose.list.constant <- result$boot.theta.choose.list.constant
+boot.nknots.choose.constant <- result$boot.nknots.choose.constant
+
+
+for(j in 1:rs.num)
+{
+  
+  Bsplinemat.choose <- bs1.(test.time,degree = 3,interior.knots=(boot.splineknots.choose[[j]])[2:((boot.nknots.choose[j])+1)], intercept=T, Boundary.knots = c((boot.splineknots.choose[[j]])[1],(boot.splineknots.choose[[j]])[(boot.nknots.choose[j])+2]))
+  boot.beta.est.choose.mat[,j] <- Bsplinemat.choose%*%(boot.theta.choose.list[[j]])[((boot.nknots.choose[j])+5):(2*((boot.nknots.choose[j])+4))]
+  boot.alpha1.choose.vec[j] <-(boot.theta.choose.list[[j]])[(2*((boot.nknots.choose[j])+4))+1]
+  boot.alpha2.choose.vec[j] <-(boot.theta.choose.list[[j]])[(2*((boot.nknots.choose[j])+4))+2]
+  
+  boot.alpha0.choose.vec.constant[j] <-(boot.theta.choose.list.constant[[j]])[((boot.nknots.choose.constant[j])+4)+1]
+  boot.alpha1.choose.vec.constant[j] <-(boot.theta.choose.list.constant[[j]])[((boot.nknots.choose.constant[j])+4)+2]
+  boot.alpha2.choose.vec.constant[j] <-(boot.theta.choose.list.constant[[j]])[((boot.nknots.choose.constant[j])+4)+3]
+  
+}
+
+
+for(j. in 1:length(test.time))
+{
+  beta.boot.2.5.choose[j.] <-quantile(boot.beta.est.choose.mat[j.,],0.025)
+  beta.boot.97.5.choose[j.] <-quantile(boot.beta.est.choose.mat[j.,],0.975)
+  
+}
+
+
+
+## compute p value
+
+count.pv.alpha1.choose <-count.pv.alpha2.choose <- 0
+count.pv.alpha0.choose.constant <-count.pv.alpha1.choose.constant <-count.pv.alpha2.choose.constant <-0
+
+for(i. in 1:rs.num)
+{
+  if((boot.alpha1.choose.vec[i.]-mean(boot.alpha1.choose.vec)>abs(monte.alpha1.choose))|(boot.alpha1.choose.vec[i.]-mean(boot.alpha1.choose.vec)< (-abs(monte.alpha1.choose)))) count.pv.alpha1.choose <- count.pv.alpha1.choose+1
+  if((boot.alpha2.choose.vec[i.]-mean(boot.alpha2.choose.vec)>abs(monte.alpha2.choose))|(boot.alpha2.choose.vec[i.]-mean(boot.alpha2.choose.vec)< (-abs(monte.alpha2.choose)))) count.pv.alpha2.choose <- count.pv.alpha2.choose+1
+  
+  if((boot.alpha0.choose.vec.constant[i.]-mean(boot.alpha0.choose.vec.constant)>abs(monte.alpha0.choose.constant))|(boot.alpha0.choose.vec.constant[i.]-mean(boot.alpha0.choose.vec.constant)< (-abs(monte.alpha0.choose.constant)))) count.pv.alpha0.choose.constant <- count.pv.alpha0.choose.constant+1
+  if((boot.alpha1.choose.vec.constant[i.]-mean(boot.alpha1.choose.vec.constant)>abs(monte.alpha1.choose.constant))|(boot.alpha1.choose.vec.constant[i.]-mean(boot.alpha1.choose.vec.constant)< (-abs(monte.alpha1.choose.constant)))) count.pv.alpha1.choose.constant <- count.pv.alpha1.choose.constant+1
+  if((boot.alpha2.choose.vec.constant[i.]-mean(boot.alpha2.choose.vec.constant)>abs(monte.alpha2.choose.constant))|(boot.alpha2.choose.vec.constant[i.]-mean(boot.alpha2.choose.vec.constant)< (-abs(monte.alpha2.choose.constant)))) count.pv.alpha2.choose.constant <- count.pv.alpha2.choose.constant+1
+  
+}
+
+pv.alpha1.choose <- count.pv.alpha1.choose/rs.num
+pv.alpha2.choose <- count.pv.alpha2.choose/rs.num
+
+pv.alpha0.choose.constant <- count.pv.alpha0.choose.constant/rs.num
+pv.alpha1.choose.constant <- count.pv.alpha1.choose.constant/rs.num
+pv.alpha2.choose.constant <- count.pv.alpha2.choose.constant/rs.num
+
+
+### compute CI
+
+boot.alpha1.choose.2.5 <-quantile(boot.alpha1.choose.vec,0.025)
+boot.alpha2.choose.2.5 <-quantile(boot.alpha2.choose.vec,0.025)
+boot.alpha1.choose.97.5 <-quantile(boot.alpha1.choose.vec,0.975)
+boot.alpha2.choose.97.5 <-quantile(boot.alpha2.choose.vec,0.975)
+
+
+
+#### plot
+
+pdf(file ="application1.pdf", width =2.76,height =2.49, pointsize =7)  
+par(mfrow=c(1,1),mar=c(3, 2.9, 2.6, 2) + 0.1,mgp = c(1.8, 0.65, 0))
+plot(test.time,monte.beta.est.mat[,1],ylim=c(min(beta.boot.2.5.choose),max(beta.boot.97.5.choose)),xlab=expression(t),ylab=expression(beta(t)), lty=1,type="l",col="red") ## beta(t)             
+lines(test.time,beta.boot.2.5.choose,lty=3,col="blue")
+lines(test.time,beta.boot.97.5.choose,lty=6,col="green")
+lines(test.time,rep(monte.alpha0.choose.constant,length(test.time)),lty=2,col="black")
+lines(test.time,rep(0,length(test.time)),lty=1,col="black")
+legend("topleft",c("Estimated Curve","Quantile 2.5%","Quantile 97.5%","Time-Invariant Estimate"),lty=c(1,3,6,2),col=c("red","blue","green","black"),cex= 0.56,text.width=20,y.intersp = 0.8,bty = "o",x.intersp=1.1,adj = c(0.05, 0.5),seg.len =1.9)
+
+dev.off()
+
+
+end<-Sys.time()
+compute_time <- end-start
+
+
+
