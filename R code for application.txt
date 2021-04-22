@@ -339,7 +339,7 @@ lambda.vector0 <- lambda.vector1 <- c(0,c(exp(seq(-0.5,15,length=14))))
 
 nknots.vector.constant <- 6 ## for function choose.lambda.constant.beta
 
-data1 <- read.csv(file="H:/sasdata/realdata3_9.csv",head=TRUE,sep=",") ## your own data
+data1 <- read.csv(file="H:/sample_data.csv",head=TRUE,sep=",") ## read the sample data
 
 result <- monte.boot(data1,nknot.pe.vary,theta0.pe,lambda.vector0,lambda.vector1,nknots.vector.constant,lambda.vector,rs.num)
 
